@@ -2,7 +2,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useCommandStore } from '@/store/command'
 import { useTransferStore } from '@/store/transfer'
 import { useRoadblockStore } from '@/store/roadblock'
-import { pointInPolygon, pathBlocked, detourPath } from '@/utils/geo'
+import { pointInPolygon, pointOnPolygon, pathBlocked, detourPath } from '@/utils/geo'
 
 setActivePinia(createPinia())
 const cmd = useCommandStore()
@@ -27,12 +27,53 @@ assert(!pathBlocked([[-1, 2], [2, 2]], square), '不相交路线放行')
 const det = detourPath([-1, 0.5], [2, 0.5], square)
 assert(det && !pathBlocked([[-1, 0.5], ...det.via, [2, 0.5]], square), '绕行路径避开封闭区')
 
+console.log('— 贴边路线不得漏检（封闭区边界共线 / 折点压边） —')
+const offSquare = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+assert(pathBlocked([[0.3, 0.8], [0.7, 0.8]], offSquare), '路线贴顶边共线重叠被拦截')
+assert(pathBlocked([[0.3, 0.2], [0.7, 0.2]], offSquare), '路线贴底边共线重叠被拦截')
+assert(pathBlocked([[0.2, 0.3], [0.2, 0.7]], offSquare), '路线贴左边共线重叠被拦截')
+assert(pathBlocked([[0.8, 0.3], [0.8, 0.7]], offSquare), '路线贴右边共线重叠被拦截')
+assert(pathBlocked([[0, 0.8], [1, 0.8]], offSquare), '整段跨越边界共线被拦截')
+assert(pathBlocked([[0.5, 1], [0.5, 0.8], [0, 1]], offSquare), '折点压在边中段（两段均在区外）被拦截')
+assert(pathBlocked([[0, -1], [0.2, 0.2], [1, 1]], offSquare), '折点与多边形顶点重合外切被拦截')
+assert(!pathBlocked([[0.85, 0.8], [1.2, 0.8]], offSquare), '共线但区间错开的路线放行')
+assert(!pathBlocked([[0.3, 0.199], [0.7, 0.199]], offSquare), '贴近但不重合的平行路线放行')
+assert(pointOnPolygon([0.5, 0.8], offSquare) && pointOnPolygon([0.2, 0.5], offSquare), '边界点识别（顶边/左边）')
+assert(!pointOnPolygon([0.5, 0.5], offSquare), '内部点不在边界上')
+
 // 江油事件 ev-001(104.7456,31.7777) 与绵阳库 rb-2(104.742,31.4641) 之间的阻断区
 const ev = cmd.events.find((e) => e.id === 'ev-001')
 const midPoly = [
   [104.6438, 31.5209], [104.8438, 31.5209],
   [104.8438, 31.7209], [104.6438, 31.7209]
 ]
+
+console.log('— 贴边漏检回归：封闭区边界压在运输走廊上，在途派发必须被拦截 —')
+// 沿绵阳→江油走廊参数线取 A/B 作为封闭区一条边，向垂直方向偏移出 C/D，走廊不进入区内
+const corridorA = [104.742, 31.4641], corridorZ = [104.7456, 31.7777]
+const cPt = (t) => [corridorA[0] + (corridorZ[0] - corridorA[0]) * t, corridorA[1] + (corridorZ[1] - corridorA[1]) * t]
+const eA = cPt(0.43), eB = cPt(0.63)
+const cdx = corridorZ[0] - corridorA[0], cdy = corridorZ[1] - corridorA[1]
+const cLen = Math.hypot(cdx, cdy), nnx = cdy / cLen, nny = -cdx / cLen
+const edgePoly = [
+  [+eA[0].toFixed(6), +eA[1].toFixed(6)],
+  [+eB[0].toFixed(6), +eB[1].toFixed(6)],
+  [+(eB[0] + nnx * 0.06).toFixed(6), +(eB[1] + nny * 0.06).toFixed(6)],
+  [+(eA[0] + nnx * 0.06).toFixed(6), +(eA[1] + nny * 0.06).toFixed(6)]
+]
+assert(pathBlocked([corridorA, corridorZ], edgePoly), '走廊直线贴着封闭区边界：几何判定命中')
+const edgeRec = cmd.dispatchResource({ baseId: 'rb-2', eventId: ev.id, type: 'medical', qty: 30 })
+const edgeRep = rb.reportBlock({ name: '边界贴走廊阻断', polygon: edgePoly })
+const edgeImp = edgeRep.block.impacts.find((i) => i.kind === 'dispatch' && i.id === edgeRec.id)
+assert(!!edgeImp, '贴边运输路线的在途派发进入影响评估（不再漏检）')
+rb.confirmImpacts(edgeRep.block.id)
+const edgeOpt = edgeImp.options.find((o) => o.action === 'detour')
+assert(!!edgeOpt, '贴边路线生成绕行候选（起终点不在区内，不必挂起）')
+edgeImp.plan = edgeOpt
+assert(rb.applyImpact(edgeRep.block.id, edgeImp.key).ok, '贴边绕行方案可执行')
+assert(!pathBlocked([corridorA, ...(edgeRec.via || []), corridorZ], edgePoly), '执行后路线避开封闭区')
+rb.clearBlock(edgeRep.block.id)
+assert(edgeRec.via.length === 0, '恢复通行后贴边绕行路线回直')
 
 console.log('— 上报 → 影响评估 → 绕行改道 → 恢复通行 —')
 const rec = cmd.dispatchResource({ baseId: 'rb-2', eventId: ev.id, type: 'food', qty: 100 })
