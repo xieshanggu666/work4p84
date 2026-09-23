@@ -19,28 +19,46 @@ export function pathKm(points) {
   return sum
 }
 
-// 射线法：点是否在多边形内
+// 点是否落在线段上（含端点；eps 容差，仅认定真正贴边，约 0.1mm 量级）
+const EPS = 1e-9
+function pointOnSegment(p, a, b) {
+  const cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+  if (Math.abs(cross) > EPS) return false
+  return (
+    p[0] >= Math.min(a[0], b[0]) - EPS && p[0] <= Math.max(a[0], b[0]) + EPS &&
+    p[1] >= Math.min(a[1], b[1]) - EPS && p[1] <= Math.max(a[1], b[1]) + EPS
+  )
+}
+
+// 射线法：点是否在多边形内（封闭区含边界——恰好压在边界上的点同样视为区内）
 export function pointInPolygon(pt, poly) {
   const [x, y] = pt
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const [xi, yi] = poly[i]
     const [xj, yj] = poly[j]
+    if (pointOnSegment(pt, poly[j], poly[i])) return true
     if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside
   }
   return inside
 }
 
-// 线段相交判定（平行/共线按不相交处理，演示精度足够）
+// 线段相交判定（共线重叠/端点贴边也算相交：贴着封闭区边界的路线必须被拦截）
 function segIntersect(p1, p2, p3, p4) {
   const d = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0])
-  if (d === 0) return false
+  if (d === 0) {
+    // 平行：仅当共线且重叠（含端点接触）时相交
+    return (
+      pointOnSegment(p3, p1, p2) || pointOnSegment(p4, p1, p2) ||
+      pointOnSegment(p1, p3, p4) || pointOnSegment(p2, p3, p4)
+    )
+  }
   const t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / d
   const u = ((p3[0] - p1[0]) * (p2[1] - p1[1]) - (p3[1] - p1[1]) * (p2[0] - p1[0])) / d
   return t >= 0 && t <= 1 && u >= 0 && u <= 1
 }
 
-// 折线是否穿越多边形（任一顶点落入内部，或任一线段与边界相交）
+// 折线是否穿越多边形（任一顶点落入区内含边界，或任一线段与边界相交/共线重叠）
 export function pathBlocked(points, poly) {
   for (const pt of points) if (pointInPolygon(pt, poly)) return true
   for (let i = 1; i < points.length; i++) {
